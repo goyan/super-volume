@@ -10,6 +10,8 @@ SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de
 - `Option + Maj` : pas fins (1/64)
 - Mises à jour automatiques (Sparkle) + « Rechercher des mises à jour… »
 
+<img width="387" height="387" alt="image" src="https://github.com/user-attachments/assets/1686dca4-06c9-47d4-8dc6-41a35bf0d4f3" />
+
 ## Installation
 
 1. Télécharge le `.dmg` dans les [Releases](https://github.com/goyan/super-volume/releases/latest) et glisse l'app dans `/Applications`.
