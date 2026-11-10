@@ -71,7 +71,16 @@ final class RouteSession {
     let destUID: String
     /// Pic du signal capté (écrit par le thread audio, lu pour le diagnostic).
     let peak = UnsafeMutablePointer<Float>.allocate(capacity: 1)
-    private(set) var inputBufferCount = 0
+    /// Pics écrits sur les branches locales (avec gain) et virtuelles (100 %) — diagnostic.
+    let peakLocal = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    let peakVirtual = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    /// Gain linéaire appliqué aux branches locales ; lu par le thread audio, modifiable à chaud.
+    private let gain = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    /// Un octet par buffer de sortie : 1 = branche locale (gain), 0 = virtuelle (100 %).
+    private var localFlags: UnsafeMutablePointer<UInt8>
+    private var localFlagCount = 0
+    /// Détail des branches (diagnostic).
+    private(set) var legsDescription = ""
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggID = AudioObjectID(kAudioObjectUnknown)
@@ -79,8 +88,9 @@ final class RouteSession {
     private let queue = DispatchQueue(label: "supervolume.route", qos: .userInteractive)
 
     /// nil + statut OSStatus en cas d'échec (typiquement : permission « Capture audio » refusée).
-    static func start(key: String, processIDs: Set<AudioObjectID>, dest: AudioDev) -> (RouteSession?, OSStatus) {
+    static func start(key: String, processIDs: Set<AudioObjectID>, dest: AudioDev, volume: Float = 1) -> (RouteSession?, OSStatus) {
         let s = RouteSession(key: key, processIDs: processIDs, destUID: dest.uid)
+        s.setVolume(volume)
         let status = s.activate(dest: dest)
         if status != noErr { s.stop(); return (nil, status) }
         return (s, noErr)
@@ -91,6 +101,16 @@ final class RouteSession {
         self.processIDs = processIDs
         self.destUID = destUID
         peak.initialize(to: 0)
+        peakLocal.initialize(to: 0)
+        peakVirtual.initialize(to: 0)
+        gain.initialize(to: 1)
+        localFlags = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
+    }
+
+    /// Volume local 0…1 (courbe quadratique, plus naturelle à l'oreille).
+    func setVolume(_ v: Float) {
+        let c = min(max(v, 0), 1)
+        gain.pointee = c * c
     }
 
     private func activate(dest: AudioDev) -> OSStatus {
@@ -107,6 +127,18 @@ final class RouteSession {
         //    Destination multi-sortie/agrégat : on reprend ses sous-périphériques en mode « stacked » (sortie dupliquée).
         let subs = Audio.subDevices(of: dest)
         let uids = subs.isEmpty ? [dest.uid] : subs.map(\.uid)
+
+        // Branches locales (gain) vs virtuelles (100 %), dans l'ordre des buffers de sortie de l'agrégat.
+        let legs = subs.isEmpty ? [dest] : subs
+        var flags: [UInt8] = []
+        for leg in legs {
+            flags += [UInt8](repeating: Audio.isVirtual(leg) ? 0 : 1, count: Audio.outputStreamCount(leg))
+        }
+        localFlags.deallocate()
+        localFlags = UnsafeMutablePointer<UInt8>.allocate(capacity: max(flags.count, 1))
+        for (i, f) in flags.enumerated() { localFlags[i] = f }
+        localFlagCount = flags.count
+        legsDescription = legs.map { "\($0.name)[virt=\(Audio.isVirtual($0)) flux=\(Audio.outputStreamCount($0))]" }.joined(separator: " | ") + " flags=\(flags)"
         let subList: [[String: Any]] = uids.enumerated().map { i, uid in
             [kAudioSubDeviceUIDKey: uid, kAudioSubDeviceDriftCompensationKey: i == 0 ? 0 : 1]
         }
@@ -115,7 +147,7 @@ final class RouteSession {
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
             kAudioAggregateDeviceMainSubDeviceKey: uids[0],
             kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceIsStackedKey: !subs.isEmpty,
+            kAudioAggregateDeviceIsStackedKey: false,   // non empilé : un buffer de sortie par branche, écrits individuellement
             kAudioAggregateDeviceTapAutoStartKey: true,
             kAudioAggregateDeviceSubDeviceListKey: subList,
             kAudioAggregateDeviceTapListKey: [[
@@ -127,9 +159,11 @@ final class RouteSession {
         guard status == noErr else { return status }
 
         // 3. IOProc : copie le flux du tap vers toutes les sorties de l'agrégat.
-        let peakPtr = peak
+        let peakPtr = peak, gainPtr = gain, flagsPtr = localFlags, flagCount = localFlagCount
+        let pLocal = peakLocal, pVirtual = peakVirtual
         status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, queue) { _, inData, _, outData, _ in
-            RouteSession.render(inData: inData, outData: outData, peak: peakPtr)
+            RouteSession.render(inData: inData, outData: outData, peak: peakPtr, gain: gainPtr,
+                                flags: flagsPtr, flagCount: flagCount, peakLocal: pLocal, peakVirtual: pVirtual)
         }
         guard status == noErr else { return status }
         return AudioDeviceStart(aggID, procID)
@@ -139,7 +173,9 @@ final class RouteSession {
     /// (les entrées des sous-périphériques, ex. BlackHole, passent avant).
     private static func render(inData: UnsafePointer<AudioBufferList>,
                                outData: UnsafeMutablePointer<AudioBufferList>,
-                               peak: UnsafeMutablePointer<Float>) {
+                               peak: UnsafeMutablePointer<Float>, gain: UnsafeMutablePointer<Float>,
+                               flags: UnsafeMutablePointer<UInt8>, flagCount: Int,
+                               peakLocal: UnsafeMutablePointer<Float>, peakVirtual: UnsafeMutablePointer<Float>) {
         let ins = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
         let outs = UnsafeMutableAudioBufferListPointer(outData)
 
@@ -154,13 +190,17 @@ final class RouteSession {
         for i in 0..<(frames * sc) { pk = max(pk, abs(src[i])) }
         if pk > peak.pointee { peak.pointee = pk }
 
-        for o in outs {
+        let g = gain.pointee
+        for (idx, o) in outs.enumerated() {
             guard let dst = o.mData?.assumingMemoryBound(to: Float.self) else { continue }
+            let isLocal = idx < flagCount && flags[idx] == 1
+            let v: Float = isLocal ? g : 1
+            if isLocal { peakLocal.pointee = max(peakLocal.pointee, pk * v) } else { peakVirtual.pointee = max(peakVirtual.pointee, pk) }
             let dc = max(Int(o.mNumberChannels), 1)
             let df = Int(o.mDataByteSize) / (MemoryLayout<Float>.size * dc)
             let n = min(frames, df)
             for f in 0..<n {
-                for c in 0..<dc { dst[f * dc + c] = c < sc ? src[f * sc + c] : 0 }
+                for c in 0..<dc { dst[f * dc + c] = c < sc ? src[f * sc + c] * v : 0 }
             }
             if df > n { memset(dst + n * dc, 0, (df - n) * dc * MemoryLayout<Float>.size) }
         }
@@ -180,7 +220,10 @@ final class RouteSession {
         tapID = AudioObjectID(kAudioObjectUnknown)
     }
 
-    deinit { peak.deallocate() }
+    deinit {
+        peak.deallocate(); peakLocal.deallocate(); peakVirtual.deallocate()
+        gain.deallocate(); localFlags.deallocate()
+    }
 }
 
 // MARK: - Routeur (règles par app + réconciliation)
@@ -191,7 +234,11 @@ struct AppEntry {
     let playing: Bool
     let destUID: String?
     let failed: Bool
+    let volume: Float
 }
+
+/// Destination spéciale : suit la sortie active du Mac (permet un volume par app sans changer de périphérique).
+let followDefaultUID = "@default"
 
 /// Règles « app → périphérique », mémorisées, réappliquées dès que l'app est présente côté audio.
 /// Thread principal uniquement.
@@ -202,12 +249,28 @@ final class AppRouter {
     private let namesKey = "appRouteNames"
     private var sessions: [String: RouteSession] = [:]
     private var failedAt: [String: Date] = [:]
+    private let volumesKey = "appVolumes"
     private var timer: Timer?
 
     var rules: [String: String] {
         get { UserDefaults.standard.dictionary(forKey: rulesKey) as? [String: String] ?? [:] }
         set { UserDefaults.standard.set(newValue, forKey: rulesKey) }
     }
+    private var volumes: [String: Double] {
+        get { UserDefaults.standard.dictionary(forKey: volumesKey) as? [String: Double] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: volumesKey) }
+    }
+
+    func volume(for key: String) -> Float { Float(volumes[key] ?? 1) }
+
+    /// Volume local de l'app (0…1) : appliqué en direct sur la session, mémorisé.
+    func setVolume(key: String, _ v: Float) {
+        var vols = volumes
+        vols[key] = Double(v)
+        volumes = vols
+        sessions[key]?.setVolume(v)
+    }
+
     private var names: [String: String] {
         get { UserDefaults.standard.dictionary(forKey: namesKey) as? [String: String] ?? [:] }
         set { UserDefaults.standard.set(newValue, forKey: namesKey) }
@@ -243,11 +306,12 @@ final class AppRouter {
             guard isRegular || p.running || rules[p.key] != nil else { continue }
             let playing = (result[p.key]?.playing ?? false) || p.running
             result[p.key] = AppEntry(key: p.key, name: AppKey.displayName(p.key), playing: playing,
-                                     destUID: rules[p.key], failed: failedAt[p.key] != nil)
+                                     destUID: rules[p.key], failed: failedAt[p.key] != nil,
+                                     volume: volume(for: p.key))
         }
         for (key, uid) in rules where result[key] == nil {
             result[key] = AppEntry(key: key, name: names[key] ?? AppKey.displayName(key), playing: false,
-                                   destUID: uid, failed: false)
+                                   destUID: uid, failed: false, volume: volume(for: key))
         }
         return result.values.sorted { ($0.playing ? 0 : 1, $0.name.lowercased()) < ($1.playing ? 0 : 1, $1.name.lowercased()) }
     }
@@ -265,7 +329,8 @@ final class AppRouter {
         }
 
         for (key, uid) in rules {
-            guard let dest = outputs.first(where: { $0.uid == uid }) else {
+            let wanted = uid == followDefaultUID ? Audio.defaultOutput()?.uid : uid
+            guard let dest = outputs.first(where: { $0.uid == wanted }) else {
                 sessions.removeValue(forKey: key)?.stop()   // destination débranchée
                 continue
             }
@@ -274,11 +339,11 @@ final class AppRouter {
                 sessions.removeValue(forKey: key)?.stop()   // l'app n'a pas (encore) de processus audio
                 continue
             }
-            if let s = sessions[key], s.processIDs == ids, s.destUID == uid { continue }
+            if let s = sessions[key], s.processIDs == ids, s.destUID == dest.uid { continue }
             sessions.removeValue(forKey: key)?.stop()
 
             if let t = failedAt[key], Date().timeIntervalSince(t) < 15 { continue }   // pas de ré-essai en boucle
-            let (session, status) = RouteSession.start(key: key, processIDs: ids, dest: dest)
+            let (session, status) = RouteSession.start(key: key, processIDs: ids, dest: dest, volume: volume(for: key))
             if let session {
                 sessions[key] = session
                 failedAt[key] = nil

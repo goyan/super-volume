@@ -80,6 +80,33 @@ enum Audio {
         return list.contains { $0.mNumberChannels > 0 }
     }
 
+    /// Nombre de flux de sortie (= buffers de sortie) d'un périphérique.
+    static func outputStreamCount(_ dev: AudioDev) -> Int {
+        var a = addr(kAudioDevicePropertyStreams)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(dev.id, &a, 0, nil, &size) == noErr else { return 0 }
+        return Int(size) / MemoryLayout<AudioObjectID>.size
+    }
+
+    /// Périphérique virtuel (BlackHole, loopback…) : il reste à 100 % dans un routage.
+    static func isVirtual(_ dev: AudioDev) -> Bool {
+        var a = addr(kAudioDevicePropertyTransportType, scope: kAudioObjectPropertyScopeGlobal)
+        var t: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(dev.id, &a, 0, nil, &size, &t) == noErr && t == kAudioDeviceTransportTypeVirtual
+    }
+
+    /// Périphérique (entrée ou sortie) par nom — diagnostic.
+    static func inputDevice(named name: String) -> AudioDev? {
+        var a = addr(kAudioHardwarePropertyDevices, scope: kAudioObjectPropertyScopeGlobal)
+        var size: UInt32 = 0
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(system, &a, 0, nil, &size) == noErr else { return nil }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &a, 0, nil, &size, &ids) == noErr else { return nil }
+        return ids.map(device).first { $0.name.localizedCaseInsensitiveContains(name) }
+    }
+
     /// Tous les périphériques ayant au moins un canal de sortie.
     static func outputDevices() -> [AudioDev] {
         var a = addr(kAudioHardwarePropertyDevices, scope: kAudioObjectPropertyScopeGlobal)

@@ -9,6 +9,7 @@ SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de
 - Pilote chaque sous-périphérique du multi-sortie (case à cocher par périphérique)
 - `Option + Maj` : pas fins (1/64)
 - **Routage par app** : envoie l'audio d'une app (Spotify…) vers n'importe quelle sortie, virtuelle (BlackHole) ou multi-sortie, mémorisé par app
+- **Volume local par app** : curseur dans le menu, appliqué aux sorties locales seulement ; les périphériques virtuels (BlackHole) restent à 100 %
 - Mises à jour automatiques (Sparkle) + « Rechercher des mises à jour… »
 
 <img width="387" height="387" alt="image" src="https://github.com/user-attachments/assets/1686dca4-06c9-47d4-8dc6-41a35bf0d4f3" />
@@ -35,6 +36,8 @@ Menu → « Routage des apps » → l'app → le périphérique de destination (
 SuperVolume capte l'audio de l'app avec un *process tap* CoreAudio (macOS 14.2+, sans driver), coupe sa sortie
 d'origine et la rejoue sur la destination. Pour l'entendre aux enceintes **et** dans BlackHole, route-la vers un
 périphérique multi-sortie qui contient les deux. La permission « Capture audio » est demandée au premier routage.
+Chaque app routée a un curseur « Volume local » : il baisse les enceintes sans toucher à ce que reçoit BlackHole.
+« Défaut du Mac (volume réglable) » donne ce curseur à une app qui n'a pas de routage particulier.
 Latence ajoutée : quelques dizaines de ms au plus.
 
 ## Build

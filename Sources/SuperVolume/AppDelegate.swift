@@ -141,18 +141,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(none)
         }
         for app in apps {
-            let destName = app.destUID.flatMap { uid in outputs.first { $0.uid == uid }?.name } ?? (app.destUID == nil ? nil : "périphérique absent")
+            let destName: String? = {
+                guard let uid = app.destUID else { return nil }
+                if uid == followDefaultUID { return "Défaut du Mac" }
+                return outputs.first { $0.uid == uid }?.name ?? "périphérique absent"
+            }()
             var title = (app.playing ? "♪ " : "") + app.name
             if let destName { title += " → " + destName }
+            if app.destUID != nil && app.volume < 0.995 { title += " · \(Int((app.volume * 100).rounded())) %" }
             if app.failed { title = "⚠︎ " + title }
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.indentationLevel = 1
             let sub = NSMenu()
+            if app.destUID != nil {
+                let sliderItem = NSMenuItem()
+                sliderItem.view = VolumeSliderView(key: app.key, value: app.volume)
+                sub.addItem(sliderItem)
+                sub.addItem(.separator())
+            }
             let reset = NSMenuItem(title: "Défaut du Mac", action: #selector(chooseRoute(_:)), keyEquivalent: "")
             reset.target = self
             reset.representedObject = RouteChoice(key: app.key, name: app.name, destUID: nil)
             reset.state = app.destUID == nil ? .on : .off
             sub.addItem(reset)
+            let adjustable = NSMenuItem(title: "Défaut du Mac (volume réglable)", action: #selector(chooseRoute(_:)), keyEquivalent: "")
+            adjustable.target = self
+            adjustable.representedObject = RouteChoice(key: app.key, name: app.name, destUID: followDefaultUID)
+            adjustable.state = app.destUID == followDefaultUID ? .on : .off
+            sub.addItem(adjustable)
             sub.addItem(.separator())
             for dev in outputs {
                 let d = NSMenuItem(title: dev.name, action: #selector(chooseRoute(_:)), keyEquivalent: "")
