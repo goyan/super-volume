@@ -12,7 +12,7 @@ SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de
 - **Volume local par app** : curseur dans le menu, appliqué aux sorties locales seulement ; les périphériques virtuels (BlackHole) restent à 100 %
 - Mises à jour automatiques (Sparkle) + « Rechercher des mises à jour… »
 
-<img width="387" height="387" alt="image" src="https://github.com/user-attachments/assets/1686dca4-06c9-47d4-8dc6-41a35bf0d4f3" />
+<img width="693" height="639" alt="image" src="https://github.com/user-attachments/assets/b9ce4b3e-59f0-49d3-85e3-dcef6da76d7b" />
 
 ## Cas d'usage
 
