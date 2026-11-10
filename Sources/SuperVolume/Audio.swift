@@ -115,7 +115,8 @@ enum Audio {
         guard AudioObjectGetPropertyDataSize(system, &a, 0, nil, &size) == noErr, size > 0 else { return [] }
         var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
         guard AudioObjectGetPropertyData(system, &a, 0, nil, &size, &ids) == noErr else { return [] }
-        return ids.filter(hasOutputChannels).map(device)
+        // On masque les agrégats privés de routage créés par SuperVolume lui-même.
+        return ids.filter(hasOutputChannels).map(device).filter { !$0.name.hasPrefix("SuperVolume-") }
     }
 
     /// Sous-périphériques actifs d'un agrégat / multi-sortie. Vide pour un périphérique ordinaire.

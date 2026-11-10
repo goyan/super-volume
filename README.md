@@ -14,6 +14,47 @@ SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de
 
 <img width="387" height="387" alt="image" src="https://github.com/user-attachments/assets/1686dca4-06c9-47d4-8dc6-41a35bf0d4f3" />
 
+## Cas d'usage
+
+### 1. Retrouver les touches volume sur un multi-sortie
+Tu as créé un « Périphérique à sortie multiple » (enceintes + BlackHole, par exemple) et les touches volume sont
+grisées. Active SuperVolume : elles règlent chaque sous-périphérique du groupe, avec le HUD habituel.
+Avec les enceintes seules, macOS garde la main, SuperVolume ne s'en mêle pas.
+
+### 2. Envoyer la musique dans une visio (WorkAdventure, Teams, Meet…) sans le reste
+Tu veux que les autres entendent Spotify, mais pas YouTube ni les notifications, et tu veux l'entendre toi aussi.
+
+1. Audio MIDI : crée un périphérique à sortie multiple avec tes enceintes **et** BlackHole 2ch.
+2. SuperVolume → « Routage des apps » → Spotify → ce périphérique multi-sortie.
+3. Dans l'outil de visio, choisis **BlackHole 2ch comme micro**.
+4. Laisse BlackHole à **1,0** (Audio MIDI) : c'est le niveau que reçoivent les autres.
+5. Menu → « Sortie à piloter » → **Suivre la sortie active du Mac** : les touches volume règlent tes enceintes
+   sans toucher à BlackHole. Le curseur « Volume local » de Spotify règle ce que **toi** tu entends, indépendamment
+   des autres apps.
+
+```
+Spotify ──► multi-sortie ─┬─► BlackHole   (100 %, fixe)  → la visio
+                          └─► Enceintes   (volume local) → toi
+Chrome, YouTube… ────────────► Enceintes seulement (défaut du Mac)
+```
+
+> La visio n'entend alors plus ton micro, puisque son entrée est BlackHole. Pour parler **et** diffuser, crée dans
+> Audio MIDI un périphérique agrégé (micro + BlackHole 2ch) et choisis-le comme entrée.
+
+### 3. Isoler une app pour un stream ou un enregistrement
+Route l'app vers **BlackHole seul** : son audio quitte les enceintes et arrive uniquement dans OBS, QuickTime
+ou ton outil de capture (source = BlackHole 2ch). Rien d'autre du Mac ne s'y mélange.
+
+### 4. Régler le volume d'une app indépendamment des autres
+Menu → l'app → **« Défaut du Mac (volume réglable) »**, puis le curseur « Volume local ». L'app reste sur ta sortie
+habituelle, mais avec son propre volume : Chrome moins fort que Spotify, par exemple. Les touches volume restent
+le réglage général.
+
+### 5. Une app par périphérique
+Spotify sur le casque, Teams sur les enceintes, un navigateur sur un écran HDMI : chaque app a sa destination,
+mémorisée et réappliquée dès qu'elle rejoue du son. Si le périphérique est débranché, l'app retombe sur le défaut
+du Mac.
+
 ## Installation
 
 1. Télécharge le `.dmg` dans les [Releases](https://github.com/goyan/super-volume/releases/latest) et glisse l'app dans `/Applications`.
@@ -28,7 +69,8 @@ SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de
 À chaque appui, l'app regarde la sortie à piloter. Si macOS sait déjà régler son volume, la touche passe.
 Sinon, SuperVolume règle le volume de chaque sous-périphérique du groupe (`VirtualMainVolume` via CoreAudio),
 sans driver audio. Attention : un sous-périphérique comme BlackHole est atténué aussi, donc ce qui s'enregistre
-depuis lui l'est également.
+depuis lui l'est également (à 0,34, le signal perd environ 33 dB). Si tu l'utilises comme source de capture ou
+de visio, garde-le à 1,0 : décoche-le dans « Sous-périphériques pilotés », ou règle les touches sur les enceintes.
 
 ## Routage par app
 
@@ -50,9 +92,14 @@ Latence ajoutée : quelques dizaines de ms au plus.
 Diagnostic sans les touches physiques :
 
 ```bash
-SuperVolume --status                 # sortie, sous-périphériques, volumes
-SuperVolume --set 0.5                # règle le volume
-SuperVolume --post-key up|down|mute  # touche média synthétique
+SuperVolume --status                       # sortie pilotée, sous-périphériques, volumes
+SuperVolume --devices                      # toutes les sorties et la composition des multi-sorties
+SuperVolume --procs                        # processus audio et clé d'app utilisée pour le routage
+SuperVolume --set 0.5                      # règle le volume de la sortie pilotée
+SuperVolume --set-device BlackHole 1.0     # règle le volume d'un périphérique précis
+SuperVolume --post-key up|down|mute        # touche média synthétique
+SuperVolume --route-test <clé> <périph> <s> [volume]   # route une app quelques secondes, affiche les niveaux
+SuperVolume --listen <périph> <s>          # niveau reçu en entrée d'un périphérique (ex. BlackHole)
 ```
 
 ## Licence
