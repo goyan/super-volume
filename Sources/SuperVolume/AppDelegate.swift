@@ -2,6 +2,15 @@ import AppKit
 import ServiceManagement
 import Sparkle
 
+final class RouteChoice: NSObject {
+    let key: String
+    let name: String
+    let destUID: String?
+    init(key: String, name: String, destUID: String?) {
+        self.key = key; self.name = name; self.destUID = destUID
+    }
+}
+
 enum AppInfo {
     static let repoURL = URL(string: "https://github.com/goyan/super-volume")!
 }
@@ -31,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         tap.handler = { [weak self] key, mods in self?.handleKey(key, mods) ?? false }
         startTap()
+        AppRouter.shared.start()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppRouter.shared.stopAll()
     }
 
     // MARK: - Tap & permission
@@ -116,7 +130,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // 4. Réglages
+        // 4. Routage par app
+        let apps = AppRouter.shared.apps()
+        menu.addItem(.separator())
+        addDisabled("Routage des apps")
+        if apps.isEmpty {
+            let none = NSMenuItem(title: "Aucune app audio détectée", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            none.indentationLevel = 1
+            menu.addItem(none)
+        }
+        for app in apps {
+            let destName = app.destUID.flatMap { uid in outputs.first { $0.uid == uid }?.name } ?? (app.destUID == nil ? nil : "périphérique absent")
+            var title = (app.playing ? "♪ " : "") + app.name
+            if let destName { title += " → " + destName }
+            if app.failed { title = "⚠︎ " + title }
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.indentationLevel = 1
+            let sub = NSMenu()
+            let reset = NSMenuItem(title: "Défaut du Mac", action: #selector(chooseRoute(_:)), keyEquivalent: "")
+            reset.target = self
+            reset.representedObject = RouteChoice(key: app.key, name: app.name, destUID: nil)
+            reset.state = app.destUID == nil ? .on : .off
+            sub.addItem(reset)
+            sub.addItem(.separator())
+            for dev in outputs {
+                let d = NSMenuItem(title: dev.name, action: #selector(chooseRoute(_:)), keyEquivalent: "")
+                d.target = self
+                d.representedObject = RouteChoice(key: app.key, name: app.name, destUID: dev.uid)
+                d.state = app.destUID == dev.uid ? .on : .off
+                sub.addItem(d)
+            }
+            if app.failed {
+                sub.addItem(.separator())
+                let hint = NSMenuItem(title: "Capture audio refusée ? Réglages Système → Confidentialité → Audio système", action: nil, keyEquivalent: "")
+                hint.isEnabled = false
+                sub.addItem(hint)
+            }
+            item.submenu = sub
+            menu.addItem(item)
+        }
+
+        // 5. Réglages
         menu.addItem(.separator())
         let enable = NSMenuItem(title: "Activer SuperVolume", action: #selector(toggleEnabled), keyEquivalent: "")
         enable.target = self
@@ -134,7 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(perm)
         }
 
-        // 5. Mises à jour, à propos, quitter
+        // 6. Mises à jour, à propos, quitter
         menu.addItem(.separator())
         let check = NSMenuItem(title: "Rechercher des mises à jour…",
                                action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
@@ -155,6 +210,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // MARK: - Actions
+
+    @objc private func chooseRoute(_ sender: NSMenuItem) {
+        guard let c = sender.representedObject as? RouteChoice else { return }
+        AppRouter.shared.setRoute(key: c.key, name: c.name, destUID: c.destUID)
+    }
 
     @objc private func chooseFollow() { VolumeController.shared.overrideUID = nil }
 

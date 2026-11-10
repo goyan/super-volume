@@ -3,11 +3,12 @@
 Les touches volume du Mac ne marchent pas sur un périphérique à sortie multiple (Audio MIDI + BlackHole…).
 SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de SoundSource, en open source.
 
-- App barre de menus, ~1 Mo, Swift natif, binaire universel (Apple Silicon + Intel), macOS 13+
+- App barre de menus, ~1 Mo, Swift natif, binaire universel (Apple Silicon + Intel), macOS 14.2+
 - Touches volume + / − / mute interceptées **uniquement** quand la sortie n'a pas de volume natif ; sinon macOS garde la main
 - Suit la sortie active, ou force un périphérique de ton choix
 - Pilote chaque sous-périphérique du multi-sortie (case à cocher par périphérique)
 - `Option + Maj` : pas fins (1/64)
+- **Routage par app** : envoie l'audio d'une app (Spotify…) vers n'importe quelle sortie, virtuelle (BlackHole) ou multi-sortie, mémorisé par app
 - Mises à jour automatiques (Sparkle) + « Rechercher des mises à jour… »
 
 <img width="387" height="387" alt="image" src="https://github.com/user-attachments/assets/1686dca4-06c9-47d4-8dc6-41a35bf0d4f3" />
@@ -27,6 +28,14 @@ SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de
 Sinon, SuperVolume règle le volume de chaque sous-périphérique du groupe (`VirtualMainVolume` via CoreAudio),
 sans driver audio. Attention : un sous-périphérique comme BlackHole est atténué aussi, donc ce qui s'enregistre
 depuis lui l'est également.
+
+## Routage par app
+
+Menu → « Routage des apps » → l'app → le périphérique de destination (ou « Défaut du Mac » pour défaire).
+SuperVolume capte l'audio de l'app avec un *process tap* CoreAudio (macOS 14.2+, sans driver), coupe sa sortie
+d'origine et la rejoue sur la destination. Pour l'entendre aux enceintes **et** dans BlackHole, route-la vers un
+périphérique multi-sortie qui contient les deux. La permission « Capture audio » est demandée au premier routage.
+Latence ajoutée : quelques dizaines de ms au plus.
 
 ## Build
 

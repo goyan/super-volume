@@ -12,7 +12,7 @@ enum Audio {
     /// kAudioHardwareServiceDeviceProperty_VirtualMainVolume ('vmvc') — évite l'API AudioHardwareService dépréciée.
     static let virtualMainVolume: AudioObjectPropertySelector = 0x766D_7663
 
-    private static func addr(
+    static func addr(
         _ selector: AudioObjectPropertySelector,
         scope: AudioObjectPropertyScope = kAudioDevicePropertyScopeOutput,
         element: AudioObjectPropertyElement = kAudioObjectPropertyElementMain
@@ -43,7 +43,7 @@ enum Audio {
         return AudioObjectSetPropertyData(id, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v) == noErr
     }
 
-    private static func string(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String {
+    static func string(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String {
         var a = addr(selector, scope: kAudioObjectPropertyScopeGlobal)
         var ref: Unmanaged<CFString>?
         var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)

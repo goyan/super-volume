@@ -24,7 +24,7 @@ cat > "$APPCAST" <<EOF
       <pubDate>$(date -u +"%a, %d %b %Y %H:%M:%S +0000")</pubDate>
       <sparkle:version>$VERSION</sparkle:version>
       <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/$REPO/releases/download/$TAG/SuperVolume-$VERSION.dmg"
                  type="application/octet-stream" $SIG/>
     </item>

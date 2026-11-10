@@ -1,0 +1,291 @@
+import AppKit
+import CoreAudio
+import Darwin
+
+// MARK: - Processus audio
+
+struct AudioProcess {
+    let id: AudioObjectID
+    let pid: pid_t
+    let bundleID: String
+    let running: Bool
+    /// Clé stable de l'app : bundle ID sans suffixe « .helper… », sinon « proc:<nom> ».
+    let key: String
+}
+
+enum AppKey {
+    static func key(bundleID: String, pid: pid_t) -> String {
+        if !bundleID.isEmpty {
+            return bundleID.replacingOccurrences(of: #"\.[Hh]elper.*$"#, with: "", options: .regularExpression)
+        }
+        var buf = [CChar](repeating: 0, count: 256)
+        proc_name(pid, &buf, 256)
+        let name = String(cString: buf)
+        return "proc:" + (name.isEmpty ? String(pid) : name)
+    }
+
+    static func displayName(_ key: String) -> String {
+        if key.hasPrefix("proc:") { return String(key.dropFirst(5)) }
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: key).first,
+           let name = app.localizedName { return name }
+        return key.split(separator: ".").last.map(String.init) ?? key
+    }
+}
+
+extension Audio {
+    /// Processus connus de CoreAudio (hors SuperVolume). Un helper Electron est un processus à part.
+    static func processes() -> [AudioProcess] {
+        var a = addr(kAudioHardwarePropertyProcessObjectList, scope: kAudioObjectPropertyScopeGlobal)
+        var size: UInt32 = 0
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(system, &a, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &a, 0, nil, &size, &ids) == noErr else { return [] }
+
+        return ids.compactMap { id in
+            var pid: Int32 = 0
+            var pa = addr(kAudioProcessPropertyPID, scope: kAudioObjectPropertyScopeGlobal)
+            var psize = UInt32(MemoryLayout<Int32>.size)
+            guard AudioObjectGetPropertyData(id, &pa, 0, nil, &psize, &pid) == noErr, pid != getpid() else { return nil }
+
+            var bundle = string(id, kAudioProcessPropertyBundleID)
+            if bundle == "?" { bundle = "" }
+
+            var running: UInt32 = 0
+            var ra = addr(kAudioProcessPropertyIsRunningOutput, scope: kAudioObjectPropertyScopeGlobal)
+            var rsize = UInt32(MemoryLayout<UInt32>.size)
+            _ = AudioObjectGetPropertyData(id, &ra, 0, nil, &rsize, &running)
+
+            return AudioProcess(id: id, pid: pid, bundleID: bundle, running: running != 0,
+                                key: AppKey.key(bundleID: bundle, pid: pid))
+        }
+    }
+}
+
+// MARK: - Session de routage (tap + agrégat privé + IOProc)
+
+/// Capte l'audio d'un groupe de processus (tap muet) et le rejoue sur le périphérique de destination.
+final class RouteSession {
+    let key: String
+    let processIDs: Set<AudioObjectID>
+    let destUID: String
+    /// Pic du signal capté (écrit par le thread audio, lu pour le diagnostic).
+    let peak = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+    private(set) var inputBufferCount = 0
+
+    private var tapID = AudioObjectID(kAudioObjectUnknown)
+    private var aggID = AudioObjectID(kAudioObjectUnknown)
+    private var procID: AudioDeviceIOProcID?
+    private let queue = DispatchQueue(label: "supervolume.route", qos: .userInteractive)
+
+    /// nil + statut OSStatus en cas d'échec (typiquement : permission « Capture audio » refusée).
+    static func start(key: String, processIDs: Set<AudioObjectID>, dest: AudioDev) -> (RouteSession?, OSStatus) {
+        let s = RouteSession(key: key, processIDs: processIDs, destUID: dest.uid)
+        let status = s.activate(dest: dest)
+        if status != noErr { s.stop(); return (nil, status) }
+        return (s, noErr)
+    }
+
+    private init(key: String, processIDs: Set<AudioObjectID>, destUID: String) {
+        self.key = key
+        self.processIDs = processIDs
+        self.destUID = destUID
+        peak.initialize(to: 0)
+    }
+
+    private func activate(dest: AudioDev) -> OSStatus {
+        // 1. Tap muet sur les processus de l'app
+        let desc = CATapDescription(stereoMixdownOfProcesses: Array(processIDs))
+        desc.uuid = UUID()
+        desc.name = "SuperVolume \(key)"
+        desc.isPrivate = true
+        desc.muteBehavior = CATapMuteBehavior.muted
+        var status = AudioHardwareCreateProcessTap(desc, &tapID)
+        guard status == noErr else { return status }
+
+        // 2. Agrégat privé : sous-périphériques de la destination + tap.
+        //    Destination multi-sortie/agrégat : on reprend ses sous-périphériques en mode « stacked » (sortie dupliquée).
+        let subs = Audio.subDevices(of: dest)
+        let uids = subs.isEmpty ? [dest.uid] : subs.map(\.uid)
+        let subList: [[String: Any]] = uids.enumerated().map { i, uid in
+            [kAudioSubDeviceUIDKey: uid, kAudioSubDeviceDriftCompensationKey: i == 0 ? 0 : 1]
+        }
+        let dict: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "SuperVolume-\(key)",
+            kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceMainSubDeviceKey: uids[0],
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: !subs.isEmpty,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceSubDeviceListKey: subList,
+            kAudioAggregateDeviceTapListKey: [[
+                kAudioSubTapDriftCompensationKey: true,
+                kAudioSubTapUIDKey: desc.uuid.uuidString,
+            ]],
+        ]
+        status = AudioHardwareCreateAggregateDevice(dict as CFDictionary, &aggID)
+        guard status == noErr else { return status }
+
+        // 3. IOProc : copie le flux du tap vers toutes les sorties de l'agrégat.
+        let peakPtr = peak
+        status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggID, queue) { _, inData, _, outData, _ in
+            RouteSession.render(inData: inData, outData: outData, peak: peakPtr)
+        }
+        guard status == noErr else { return status }
+        return AudioDeviceStart(aggID, procID)
+    }
+
+    /// Thread audio : aucune allocation. Le flux du tap est le dernier buffer d'entrée de l'agrégat
+    /// (les entrées des sous-périphériques, ex. BlackHole, passent avant).
+    private static func render(inData: UnsafePointer<AudioBufferList>,
+                               outData: UnsafeMutablePointer<AudioBufferList>,
+                               peak: UnsafeMutablePointer<Float>) {
+        let ins = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
+        let outs = UnsafeMutableAudioBufferListPointer(outData)
+
+        guard let last = ins.last, let src = last.mData?.assumingMemoryBound(to: Float.self) else {
+            for o in outs { if let p = o.mData { memset(p, 0, Int(o.mDataByteSize)) } }
+            return
+        }
+        let sc = max(Int(last.mNumberChannels), 1)
+        let frames = Int(last.mDataByteSize) / (MemoryLayout<Float>.size * sc)
+
+        var pk: Float = 0
+        for i in 0..<(frames * sc) { pk = max(pk, abs(src[i])) }
+        if pk > peak.pointee { peak.pointee = pk }
+
+        for o in outs {
+            guard let dst = o.mData?.assumingMemoryBound(to: Float.self) else { continue }
+            let dc = max(Int(o.mNumberChannels), 1)
+            let df = Int(o.mDataByteSize) / (MemoryLayout<Float>.size * dc)
+            let n = min(frames, df)
+            for f in 0..<n {
+                for c in 0..<dc { dst[f * dc + c] = c < sc ? src[f * sc + c] : 0 }
+            }
+            if df > n { memset(dst + n * dc, 0, (df - n) * dc * MemoryLayout<Float>.size) }
+        }
+    }
+
+    func stop() {
+        if aggID != kAudioObjectUnknown {
+            if let procID {
+                AudioDeviceStop(aggID, procID)
+                AudioDeviceDestroyIOProcID(aggID, procID)
+            }
+            AudioHardwareDestroyAggregateDevice(aggID)
+        }
+        if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
+        procID = nil
+        aggID = AudioObjectID(kAudioObjectUnknown)
+        tapID = AudioObjectID(kAudioObjectUnknown)
+    }
+
+    deinit { peak.deallocate() }
+}
+
+// MARK: - Routeur (règles par app + réconciliation)
+
+struct AppEntry {
+    let key: String
+    let name: String
+    let playing: Bool
+    let destUID: String?
+    let failed: Bool
+}
+
+/// Règles « app → périphérique », mémorisées, réappliquées dès que l'app est présente côté audio.
+/// Thread principal uniquement.
+final class AppRouter {
+    static let shared = AppRouter()
+
+    private let rulesKey = "appRoutes"
+    private let namesKey = "appRouteNames"
+    private var sessions: [String: RouteSession] = [:]
+    private var failedAt: [String: Date] = [:]
+    private var timer: Timer?
+
+    var rules: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: rulesKey) as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: rulesKey) }
+    }
+    private var names: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: namesKey) as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: namesKey) }
+    }
+
+    func start() {
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.reconcile() }
+        reconcile()
+    }
+
+    func stopAll() {
+        timer?.invalidate()
+        sessions.values.forEach { $0.stop() }
+        sessions.removeAll()
+    }
+
+    func setRoute(key: String, name: String, destUID: String?) {
+        var r = rules
+        var n = names
+        if let destUID { r[key] = destUID; n[key] = name } else { r.removeValue(forKey: key); n.removeValue(forKey: key) }
+        rules = r
+        names = n
+        failedAt[key] = nil
+        reconcile()
+    }
+
+    /// Apps affichées dans le menu : celles qui ont un processus audio « regular » ou qui jouent, plus celles avec une règle.
+    func apps() -> [AppEntry] {
+        var result: [String: AppEntry] = [:]
+        let rules = self.rules
+        for p in Audio.processes() {
+            let isRegular = NSRunningApplication.runningApplications(withBundleIdentifier: p.key).first?.activationPolicy == .regular
+            guard isRegular || p.running || rules[p.key] != nil else { continue }
+            let playing = (result[p.key]?.playing ?? false) || p.running
+            result[p.key] = AppEntry(key: p.key, name: AppKey.displayName(p.key), playing: playing,
+                                     destUID: rules[p.key], failed: failedAt[p.key] != nil)
+        }
+        for (key, uid) in rules where result[key] == nil {
+            result[key] = AppEntry(key: key, name: names[key] ?? AppKey.displayName(key), playing: false,
+                                   destUID: uid, failed: false)
+        }
+        return result.values.sorted { ($0.playing ? 0 : 1, $0.name.lowercased()) < ($1.playing ? 0 : 1, $1.name.lowercased()) }
+    }
+
+    func reconcile() {
+        let rules = self.rules
+        if rules.isEmpty && sessions.isEmpty { return }
+
+        let procs = Audio.processes()
+        let outputs = Audio.outputDevices()
+
+        // Sessions sans règle : arrêt
+        for key in sessions.keys where rules[key] == nil {
+            sessions.removeValue(forKey: key)?.stop()
+        }
+
+        for (key, uid) in rules {
+            guard let dest = outputs.first(where: { $0.uid == uid }) else {
+                sessions.removeValue(forKey: key)?.stop()   // destination débranchée
+                continue
+            }
+            let ids = Set(procs.filter { $0.key == key }.map(\.id))
+            if ids.isEmpty {
+                sessions.removeValue(forKey: key)?.stop()   // l'app n'a pas (encore) de processus audio
+                continue
+            }
+            if let s = sessions[key], s.processIDs == ids, s.destUID == uid { continue }
+            sessions.removeValue(forKey: key)?.stop()
+
+            if let t = failedAt[key], Date().timeIntervalSince(t) < 15 { continue }   // pas de ré-essai en boucle
+            let (session, status) = RouteSession.start(key: key, processIDs: ids, dest: dest)
+            if let session {
+                sessions[key] = session
+                failedAt[key] = nil
+            } else {
+                failedAt[key] = Date()
+                FileHandle.standardError.write(Data("route \(key): échec OSStatus \(status)\n".utf8))
+            }
+        }
+    }
+}
