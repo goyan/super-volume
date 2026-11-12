@@ -11,6 +11,16 @@ final class RouteChoice: NSObject {
     }
 }
 
+/// Choix de copie d'une app : `copyUID` nil = aucune copie.
+final class CopyChoice: NSObject {
+    let key: String
+    let name: String
+    let copyUID: String?
+    init(key: String, name: String, copyUID: String?) {
+        self.key = key; self.name = name; self.copyUID = copyUID
+    }
+}
+
 enum AppInfo {
     static let repoURL = URL(string: "https://github.com/goyan/super-volume")!
 }
@@ -148,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }()
             var title = (app.playing ? "♪ " : "") + app.name
             if let destName { title += " → " + destName }
+            if let copyUID = app.copyUID { title += " + " + (outputs.first { $0.uid == copyUID }?.name ?? "copie absente") }
             if app.destUID != nil && app.volume < 0.995 { title += " · \(Int((app.volume * 100).rounded())) %" }
             if app.failed { title = "⚠︎ " + title }
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
@@ -176,6 +187,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 d.representedObject = RouteChoice(key: app.key, name: app.name, destUID: dev.uid)
                 d.state = app.destUID == dev.uid ? .on : .off
                 sub.addItem(d)
+            }
+            // Copie vers un périphérique virtuel (BlackHole…) en plus de la destination : la visio capte l'app
+            // pendant que tu l'entends sur la sortie active, même si elle change (casque Bluetooth branché).
+            let virtuals = outputs.filter { Audio.isVirtual($0) }
+            if !virtuals.isEmpty {
+                sub.addItem(.separator())
+                let header = NSMenuItem(title: "Copier aussi vers", action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                sub.addItem(header)
+                let noCopy = NSMenuItem(title: "Aucune copie", action: #selector(chooseCopy(_:)), keyEquivalent: "")
+                noCopy.target = self
+                noCopy.representedObject = CopyChoice(key: app.key, name: app.name, copyUID: nil)
+                noCopy.state = app.copyUID == nil ? .on : .off
+                sub.addItem(noCopy)
+                for dev in virtuals {
+                    let c = NSMenuItem(title: dev.name, action: #selector(chooseCopy(_:)), keyEquivalent: "")
+                    c.target = self
+                    c.representedObject = CopyChoice(key: app.key, name: app.name, copyUID: dev.uid)
+                    c.state = app.copyUID == dev.uid ? .on : .off
+                    sub.addItem(c)
+                }
             }
             if app.failed {
                 sub.addItem(.separator())
@@ -230,6 +262,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func chooseRoute(_ sender: NSMenuItem) {
         guard let c = sender.representedObject as? RouteChoice else { return }
         AppRouter.shared.setRoute(key: c.key, name: c.name, destUID: c.destUID)
+    }
+
+    @objc private func chooseCopy(_ sender: NSMenuItem) {
+        guard let c = sender.representedObject as? CopyChoice else { return }
+        AppRouter.shared.setCopy(key: c.key, name: c.name, copyUID: c.copyUID)
     }
 
     @objc private func chooseFollow() { VolumeController.shared.overrideUID = nil }

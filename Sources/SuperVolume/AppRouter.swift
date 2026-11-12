@@ -69,6 +69,8 @@ final class RouteSession {
     let key: String
     let processIDs: Set<AudioObjectID>
     let destUID: String
+    /// Périphérique qui reçoit aussi une copie (ex. BlackHole pour une visio), à 100 % ; nil sans copie.
+    let copyUID: String?
     /// Pic du signal capté (écrit par le thread audio, lu pour le diagnostic).
     let peak = UnsafeMutablePointer<Float>.allocate(capacity: 1)
     /// Pics écrits sur les branches locales (avec gain) et virtuelles (100 %) — diagnostic.
@@ -88,18 +90,20 @@ final class RouteSession {
     private let queue = DispatchQueue(label: "supervolume.route", qos: .userInteractive)
 
     /// nil + statut OSStatus en cas d'échec (typiquement : permission « Capture audio » refusée).
-    static func start(key: String, processIDs: Set<AudioObjectID>, dest: AudioDev, volume: Float = 1) -> (RouteSession?, OSStatus) {
-        let s = RouteSession(key: key, processIDs: processIDs, destUID: dest.uid)
+    static func start(key: String, processIDs: Set<AudioObjectID>, dest: AudioDev, copy: AudioDev? = nil,
+                      volume: Float = 1) -> (RouteSession?, OSStatus) {
+        let s = RouteSession(key: key, processIDs: processIDs, destUID: dest.uid, copyUID: copy?.uid)
         s.setVolume(volume)
-        let status = s.activate(dest: dest)
+        let status = s.activate(dest: dest, copy: copy)
         if status != noErr { s.stop(); return (nil, status) }
         return (s, noErr)
     }
 
-    private init(key: String, processIDs: Set<AudioObjectID>, destUID: String) {
+    private init(key: String, processIDs: Set<AudioObjectID>, destUID: String, copyUID: String?) {
         self.key = key
         self.processIDs = processIDs
         self.destUID = destUID
+        self.copyUID = copyUID
         peak.initialize(to: 0)
         peakLocal.initialize(to: 0)
         peakVirtual.initialize(to: 0)
@@ -113,7 +117,7 @@ final class RouteSession {
         gain.pointee = c * c
     }
 
-    private func activate(dest: AudioDev) -> OSStatus {
+    private func activate(dest: AudioDev, copy: AudioDev?) -> OSStatus {
         // 1. Tap muet sur les processus de l'app
         let desc = CATapDescription(stereoMixdownOfProcesses: Array(processIDs))
         desc.uuid = UUID()
@@ -124,12 +128,20 @@ final class RouteSession {
         guard status == noErr else { return status }
 
         // 2. Agrégat privé : sous-périphériques de la destination + tap.
-        //    Destination multi-sortie/agrégat : on reprend ses sous-périphériques en mode « stacked » (sortie dupliquée).
-        let subs = Audio.subDevices(of: dest)
-        let uids = subs.isEmpty ? [dest.uid] : subs.map(\.uid)
+        //    Destination multi-sortie/agrégat : on reprend ses sous-périphériques (sortie dupliquée).
+        //    Copie : ses branches s'ajoutent après celles de la destination, qui reste l'horloge principale
+        //    (la copie est recalée par la correction de dérive). Une branche déjà présente n'est pas doublée.
+        func legsOf(_ d: AudioDev) -> [AudioDev] {
+            let subs = Audio.subDevices(of: d)
+            return subs.isEmpty ? [d] : subs
+        }
+        var legs = legsOf(dest)
+        if let copy {
+            for leg in legsOf(copy) where !legs.contains(where: { $0.uid == leg.uid }) { legs.append(leg) }
+        }
+        let uids = legs.map(\.uid)
 
         // Branches locales (gain) vs virtuelles (100 %), dans l'ordre des buffers de sortie de l'agrégat.
-        let legs = subs.isEmpty ? [dest] : subs
         var flags: [UInt8] = []
         for leg in legs {
             flags += [UInt8](repeating: Audio.isVirtual(leg) ? 0 : 1, count: Audio.outputStreamCount(leg))
@@ -235,6 +247,8 @@ struct AppEntry {
     let destUID: String?
     let failed: Bool
     let volume: Float
+    /// Périphérique qui reçoit aussi une copie (ex. BlackHole), nil sans copie.
+    let copyUID: String?
 }
 
 /// Destination spéciale : suit la sortie active du Mac (permet un volume par app sans changer de périphérique).
@@ -250,7 +264,15 @@ final class AppRouter {
     private var sessions: [String: RouteSession] = [:]
     private var failedAt: [String: Date] = [:]
     private let volumesKey = "appVolumes"
+    private let copiesKey = "appCopies"
     private var timer: Timer?
+
+    /// Copies « app → périphérique en plus » : la destination reste celle de la règle (souvent la sortie active du
+    /// Mac), la copie part en parallèle à 100 %. Ex. Spotify → casque actif + BlackHole pour une visio.
+    var copies: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: copiesKey) as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: copiesKey) }
+    }
 
     var rules: [String: String] {
         get { UserDefaults.standard.dictionary(forKey: rulesKey) as? [String: String] ?? [:] }
@@ -293,6 +315,21 @@ final class AppRouter {
         if let destUID { r[key] = destUID; n[key] = name } else { r.removeValue(forKey: key); n.removeValue(forKey: key) }
         rules = r
         names = n
+        // « Défaut du Mac » sans routage : plus de session, donc plus de copie non plus.
+        if destUID == nil { var c = copies; c.removeValue(forKey: key); copies = c }
+        failedAt[key] = nil
+        reconcile()
+    }
+
+    /// Copie vers un périphérique en plus (nil : aucune). Sans règle, l'app suit alors la sortie active du Mac.
+    func setCopy(key: String, name: String, copyUID: String?) {
+        var c = copies
+        if let copyUID { c[key] = copyUID } else { c.removeValue(forKey: key) }
+        copies = c
+        if copyUID != nil && rules[key] == nil {
+            setRoute(key: key, name: name, destUID: followDefaultUID)
+            return
+        }
         failedAt[key] = nil
         reconcile()
     }
@@ -301,23 +338,25 @@ final class AppRouter {
     func apps() -> [AppEntry] {
         var result: [String: AppEntry] = [:]
         let rules = self.rules
+        let copies = self.copies
         for p in Audio.processes() {
             let isRegular = NSRunningApplication.runningApplications(withBundleIdentifier: p.key).first?.activationPolicy == .regular
             guard isRegular || p.running || rules[p.key] != nil else { continue }
             let playing = (result[p.key]?.playing ?? false) || p.running
             result[p.key] = AppEntry(key: p.key, name: AppKey.displayName(p.key), playing: playing,
                                      destUID: rules[p.key], failed: failedAt[p.key] != nil,
-                                     volume: volume(for: p.key))
+                                     volume: volume(for: p.key), copyUID: copies[p.key])
         }
         for (key, uid) in rules where result[key] == nil {
             result[key] = AppEntry(key: key, name: names[key] ?? AppKey.displayName(key), playing: false,
-                                   destUID: uid, failed: false, volume: volume(for: key))
+                                   destUID: uid, failed: false, volume: volume(for: key), copyUID: copies[key])
         }
         return result.values.sorted { ($0.playing ? 0 : 1, $0.name.lowercased()) < ($1.playing ? 0 : 1, $1.name.lowercased()) }
     }
 
     func reconcile() {
         let rules = self.rules
+        let copies = self.copies
         if rules.isEmpty && sessions.isEmpty { return }
 
         let procs = Audio.processes()
@@ -339,11 +378,15 @@ final class AppRouter {
                 sessions.removeValue(forKey: key)?.stop()   // l'app n'a pas (encore) de processus audio
                 continue
             }
-            if let s = sessions[key], s.processIDs == ids, s.destUID == dest.uid { continue }
+            // Copie débranchée : la destination continue seule ; elle revient d'elle-même au rebranchement.
+            // Copie identique à la destination (ex. sortie active = BlackHole) : inutile.
+            let copy = copies[key].flatMap { uid in outputs.first { $0.uid == uid } }.flatMap { $0.uid == dest.uid ? nil : $0 }
+            if let s = sessions[key], s.processIDs == ids, s.destUID == dest.uid, s.copyUID == copy?.uid { continue }
             sessions.removeValue(forKey: key)?.stop()
 
             if let t = failedAt[key], Date().timeIntervalSince(t) < 15 { continue }   // pas de ré-essai en boucle
-            let (session, status) = RouteSession.start(key: key, processIDs: ids, dest: dest, volume: volume(for: key))
+            let (session, status) = RouteSession.start(key: key, processIDs: ids, dest: dest, copy: copy,
+                                                       volume: volume(for: key))
             if let session {
                 sessions[key] = session
                 failedAt[key] = nil
