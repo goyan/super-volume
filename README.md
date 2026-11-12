@@ -10,6 +10,8 @@ SuperVolume les fait fonctionner : même principe que « Super Volume Keys » de
 - `Option + Maj` : pas fins (1/64)
 - **Routage par app** : envoie l'audio d'une app (Spotify…) vers n'importe quelle sortie, virtuelle (BlackHole) ou multi-sortie, mémorisé par app
 - **Volume local par app** : curseur dans le menu, appliqué aux sorties locales seulement ; les périphériques virtuels (BlackHole) restent à 100 %
+- **Copie vers un périphérique virtuel** : l'app joue sur ta sortie active (casque, enceintes…) **et** part en parallèle
+  vers BlackHole à 100 %, même quand tu changes de sortie. Plus besoin de multi-sortie pour diffuser dans une visio
 - Mises à jour automatiques (Sparkle) + « Rechercher des mises à jour… »
 
 <img width="693" height="639" alt="image" src="https://github.com/user-attachments/assets/b9ce4b3e-59f0-49d3-85e3-dcef6da76d7b" />
@@ -22,24 +24,37 @@ grisées. Active SuperVolume : elles règlent chaque sous-périphérique du grou
 Avec les enceintes seules, macOS garde la main, SuperVolume ne s'en mêle pas.
 
 ### 2. Envoyer la musique dans une visio (WorkAdventure, Teams, Meet…) sans le reste
-Tu veux que les autres entendent Spotify, mais pas YouTube ni les notifications, et tu veux l'entendre toi aussi.
+Tu veux que les autres entendent Spotify à 100 %, mais pas YouTube ni les notifications, et tu veux l'entendre toi
+aussi, sur ta sortie du moment : enceintes, ou casque dès qu'il est branché (Bluetooth compris).
 
-1. Audio MIDI : crée un périphérique à sortie multiple avec tes enceintes **et** BlackHole 2ch.
-2. SuperVolume → « Routage des apps » → Spotify → ce périphérique multi-sortie.
-3. Dans l'outil de visio, choisis **BlackHole 2ch comme micro**.
-4. Laisse BlackHole à **1,0** (Audio MIDI) : c'est le niveau que reçoivent les autres.
-5. Menu → « Sortie à piloter » → **Suivre la sortie active du Mac** : les touches volume règlent tes enceintes
-   sans toucher à BlackHole. Le curseur « Volume local » de Spotify règle ce que **toi** tu entends, indépendamment
-   des autres apps.
+1. SuperVolume → « Routage des apps » → Spotify → **« Défaut du Mac (volume réglable) »**.
+2. Même sous-menu → « Copier aussi vers » → **BlackHole 2ch**.
+3. Laisse BlackHole à **1,0** (`SuperVolume --set-device BlackHole 1.0`) : c'est le niveau que reçoivent les autres.
+4. Le curseur « Volume local » de Spotify règle ce que **toi** tu entends ; la copie vers BlackHole reste à 100 %.
 
 ```
-Spotify ──► multi-sortie ─┬─► BlackHole   (100 %, fixe)  → la visio
-                          └─► Enceintes   (volume local) → toi
-Chrome, YouTube… ────────────► Enceintes seulement (défaut du Mac)
+Spotify ─┬─► sortie active du Mac (casque / enceintes)  volume local → toi
+         └─► BlackHole 2ch                              100 %, fixe  → la visio
+Chrome, YouTube… ──► sortie active du Mac seulement
 ```
 
-> La visio n'entend alors plus ton micro, puisque son entrée est BlackHole. Pour parler **et** diffuser, crée dans
-> Audio MIDI un périphérique agrégé (micro + BlackHole 2ch) et choisis-le comme entrée.
+Côté visio :
+
+| Réglage | Valeur |
+|---|---|
+| Entrée de diffusion (ex. WorkAdventure → Jam Spotify → « Entrée audio ») | **BlackHole 2ch** |
+| Micro pour parler | **Micro MacBook Pro** (voir ci-dessous) |
+| Haut-parleur | **Par défaut** (suit la sortie du Mac) |
+| À ne jamais faire | choisir BlackHole comme haut-parleur : la voix des autres repartirait dans la diffusion |
+
+> **Casque Bluetooth** : dès qu'une app (Teams, la visio) utilise son micro, le casque passe en mode « appel »
+> (16 kHz mono) et ton écoute se dégrade. Prends le micro du Mac dans tes visios pour le garder en stéréo.
+>
+> **Pourquoi pas un multi-sortie Audio MIDI ?** Ses sous-périphériques sont figés : avec « enceintes + BlackHole »,
+> Spotify reste sur les enceintes même quand ton casque est la sortie active.
+>
+> Pour un outil qui n'a qu'une seule entrée (Teams, Meet) : choisir BlackHole comme micro coupe ta voix. Pour parler
+> **et** diffuser, crée dans Audio MIDI un périphérique agrégé (micro + BlackHole 2ch) et choisis-le comme entrée.
 
 ### 3. Isoler une app pour un stream ou un enregistrement
 Route l'app vers **BlackHole seul** : son audio quitte les enceintes et arrive uniquement dans OBS, QuickTime
@@ -76,8 +91,9 @@ de visio, garde-le à 1,0 : décoche-le dans « Sous-périphériques pilotés »
 
 Menu → « Routage des apps » → l'app → le périphérique de destination (ou « Défaut du Mac » pour défaire).
 SuperVolume capte l'audio de l'app avec un *process tap* CoreAudio (macOS 14.2+, sans driver), coupe sa sortie
-d'origine et la rejoue sur la destination. Pour l'entendre aux enceintes **et** dans BlackHole, route-la vers un
-périphérique multi-sortie qui contient les deux. La permission « Capture audio » est demandée au premier routage.
+d'origine et la rejoue sur la destination. Pour l'entendre sur ta sortie **et** l'envoyer dans BlackHole, utilise
+« Copier aussi vers » : la copie part à 100 % vers un périphérique virtuel, en plus de la destination. Elle survit
+aux changements de sortie ; si la copie est débranchée, la destination continue seule. La permission « Capture audio » est demandée au premier routage.
 Chaque app routée a un curseur « Volume local » : il baisse les enceintes sans toucher à ce que reçoit BlackHole.
 « Défaut du Mac (volume réglable) » donne ce curseur à une app qui n'a pas de routage particulier.
 Latence ajoutée : quelques dizaines de ms au plus.
