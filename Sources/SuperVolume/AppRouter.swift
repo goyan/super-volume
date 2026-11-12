@@ -86,6 +86,8 @@ final class RouteSession {
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggID = AudioObjectID(kAudioObjectUnknown)
+    /// UID de l'agrégat : sert à vérifier qu'il existe encore (un redémarrage de coreaudiod le fait disparaître).
+    private let aggUID = UUID().uuidString
     private var procID: AudioDeviceIOProcID?
     private let queue = DispatchQueue(label: "supervolume.route", qos: .userInteractive)
 
@@ -156,7 +158,7 @@ final class RouteSession {
         }
         let dict: [String: Any] = [
             kAudioAggregateDeviceNameKey: "SuperVolume-\(key)",
-            kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceUIDKey: aggUID,
             kAudioAggregateDeviceMainSubDeviceKey: uids[0],
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,   // non empilé : un buffer de sortie par branche, écrits individuellement
@@ -232,6 +234,20 @@ final class RouteSession {
         tapID = AudioObjectID(kAudioObjectUnknown)
     }
 
+    /// Faux après un redémarrage de coreaudiod : l'agrégat a disparu, ou son ID désigne désormais autre chose.
+    var isAlive: Bool {
+        aggID != kAudioObjectUnknown && Audio.deviceID(forUID: aggUID) == aggID
+    }
+
+    /// Oublie une session morte sans rien détruire : après un redémarrage de coreaudiod, le tap et l'agrégat
+    /// n'existent plus, et leurs anciens IDs peuvent avoir été réattribués à d'autres objets (ex. un agrégat
+    /// Audio MIDI de l'utilisateur), qu'un `stop()` détruirait.
+    func abandon() {
+        procID = nil
+        aggID = AudioObjectID(kAudioObjectUnknown)
+        tapID = AudioObjectID(kAudioObjectUnknown)
+    }
+
     deinit {
         peak.deallocate(); peakLocal.deallocate(); peakVirtual.deallocate()
         gain.deallocate(); localFlags.deallocate()
@@ -300,6 +316,20 @@ final class AppRouter {
 
     func start() {
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.reconcile() }
+        // coreaudiod redémarré (mise à jour, pilote ajouté/retiré, `killall coreaudiod`) : toutes les sessions
+        // sont mortes, on les recrée. Le contrôle `isAlive` de reconcile() couvre une notification manquée.
+        var a = Audio.addr(kAudioHardwarePropertyServiceRestarted, scope: kAudioObjectPropertyScopeGlobal)
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &a, .main) { [weak self] _, _ in
+            self?.serviceRestarted()
+        }
+        reconcile()
+    }
+
+    private func serviceRestarted() {
+        FileHandle.standardError.write(Data("coreaudiod redémarré : sessions recréées\n".utf8))
+        sessions.values.forEach { $0.abandon() }
+        sessions.removeAll()
+        failedAt.removeAll()
         reconcile()
     }
 
@@ -381,6 +411,10 @@ final class AppRouter {
             // Copie débranchée : la destination continue seule ; elle revient d'elle-même au rebranchement.
             // Copie identique à la destination (ex. sortie active = BlackHole) : inutile.
             let copy = copies[key].flatMap { uid in outputs.first { $0.uid == uid } }.flatMap { $0.uid == dest.uid ? nil : $0 }
+            if let s = sessions[key], !s.isAlive {
+                sessions.removeValue(forKey: key)?.abandon()   // morte sans prévenir (coreaudiod redémarré)
+                FileHandle.standardError.write(Data("route \(key): session morte, recréée\n".utf8))
+            }
             if let s = sessions[key], s.processIDs == ids, s.destUID == dest.uid, s.copyUID == copy?.uid { continue }
             sessions.removeValue(forKey: key)?.stop()
 

@@ -60,6 +60,19 @@ enum Audio {
         AudioDev(id: id, name: string(id, kAudioObjectPropertyName), uid: string(id, kAudioDevicePropertyDeviceUID))
     }
 
+    /// ID actuel du périphérique portant cet UID (agrégats privés de ce processus compris), nil s'il n'existe plus.
+    static func deviceID(forUID uid: String) -> AudioObjectID? {
+        var a = addr(kAudioHardwarePropertyTranslateUIDToDevice, scope: kAudioObjectPropertyScopeGlobal)
+        var cfUID = uid as CFString
+        var id = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = withUnsafeMutablePointer(to: &cfUID) {
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a,
+                                       UInt32(MemoryLayout<CFString>.size), $0, &size, &id)
+        }
+        return status == noErr && id != kAudioObjectUnknown ? id : nil
+    }
+
     static func defaultOutput() -> AudioDev? {
         var a = addr(kAudioHardwarePropertyDefaultOutputDevice, scope: kAudioObjectPropertyScopeGlobal)
         var id = AudioObjectID(kAudioObjectUnknown)
